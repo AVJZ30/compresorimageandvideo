@@ -601,7 +601,9 @@
     });
 
     async function ensureFFmpeg() {
-      if (ffmpegLoaded && ffmpeg) return ffmpeg;
+      // Instancia nueva en cada ejecución: FFmpeg.wasm 0.11 falla con exit(0) si se reutiliza.
+      try { if (ffmpeg) ffmpeg.exit(); } catch (_) {}
+      ffmpeg = null; ffmpegLoaded = false;
       if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
         throw new Error('No se pudo cargar FFmpeg.wasm. Revisa tu conexión o bloqueadores de contenido.');
       }
@@ -683,16 +685,15 @@
           }
         }
 
-        const engine = await ensureFFmpeg();
-
         const arrayBuffer = await selectedVideo.arrayBuffer();
         if (arrayBuffer.byteLength > 2 * 1024 * 1024 * 1024) {
           throw new Error('FFmpeg.wasm no puede procesar archivos de 2 GB o más.');
         }
-
-        engine.FS('writeFile', inputName, new Uint8Array(arrayBuffer));
+        const inputData = new Uint8Array(arrayBuffer);
 
         const runOnce = async (plan) => {
+          const engine = await ensureFFmpeg();
+          engine.FS('writeFile', inputName, inputData);
           const args = ['-y', '-i', inputName, '-map_metadata', '-1'];
           const vf = getScaleFilter(plan ? plan.res : resolution);
           if (vf) args.push('-vf', vf);
@@ -710,7 +711,9 @@
           args.push('-c:a', 'aac', '-b:a', plan ? `${plan.audioK}k` : preset.audio,
                     '-movflags', '+faststart', '-pix_fmt', 'yuv420p', outputName);
           await engine.run(...args);
-          const out = engine.FS('readFile', outputName);
+          const out = engine.FS('readFile', outputName).slice();
+          try { engine.exit(); } catch (_) {}
+          ffmpegLoaded = false;
           return new Blob([out.buffer], { type: 'video/mp4' });
         };
 
@@ -726,7 +729,6 @@
             blob = await runOnce(plan);
             if (blob.size <= targetBytes) break;
             factor *= (targetBytes / blob.size) * 0.95;
-            try { engine.FS('unlink', outputName); } catch (_) {}
           }
           if (blob.size > targetBytes) {
             alert(`No se logró bajar de ${formatBytes(targetBytes)} (quedó en ${formatBytes(blob.size)}). El video es muy largo para ese límite; prueba un límite mayor o recórtalo.`);
@@ -750,8 +752,6 @@
         setVideoProgress(100, 'Compresión completada.');
         showSocialModal();
 
-        try { engine.FS('unlink', inputName); } catch (_) {}
-        try { engine.FS('unlink', outputName); } catch (_) {}
       } catch (err) {
         console.error(err);
         const msg = String(err?.message || err);
